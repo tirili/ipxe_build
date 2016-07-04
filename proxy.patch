@@ -121,7 +121,6 @@ diff -uNr ipxe_build.20160407/src/net/tcp/httpconn.c ipxe_build.proxy/src/net/tc
 
         /* Identify port */
 -       port = uri_port ( uri, scheme->port );
-+       #port = uri_port ( uri, scheme->port );
 +       port = proxied_uri_port ( uri, scheme->port ) );
 
         /* Look for a reusable connection in the pool */
