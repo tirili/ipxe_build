@@ -1,0 +1,169 @@
+diff -uNr ipxe_build.20160407/src/include/ipxe/proxy.h ipxe_build.proxy/src/include/ipxe/proxy.h
+--- ipxe_build.20160407/src/include/ipxe/proxy.h        1970-01-01 01:00:00.000000000 +0100
++++ ipxe_build.proxy/src/include/ipxe/proxy.h   2016-07-04 12:34:48.210367973 +0200
+@@ -0,0 +1,17 @@
++#ifndef _IPXE_PROXY_H
++#define _IPXE_PROXY_H
++
++/** @file
++ *
++ * HTTP Proxy
++ *
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER );
++
++int is_proxy_set ( );
++struct uri *get_proxy ( );
++const char *proxied_uri_host ( struct uri *uri );
++unsigned int proxied_uri_port ( struct uri *uri, unsigned int default_port );
++
++#endif /* _IPXE_IP_H */
+diff -uNr ipxe_build.20160407/src/include/ipxe/settings.h ipxe_build.proxy/src/include/ipxe/settings.h
+--- ipxe_build.20160407/src/include/ipxe/settings.h     2016-03-21 15:14:10.000000000 +0100
++++ ipxe_build.proxy/src/include/ipxe/settings.h        2016-07-04 12:36:42.016521640 +0200
+@@ -450,6 +450,8 @@
+ mac_setting __setting ( SETTING_NETDEV, mac );
+ extern const struct setting
+ busid_setting __setting ( SETTING_NETDEV, busid );
++extern struct setting
++http_proxy_setting __setting ( SETTING_MISC, ip );
+ extern const struct setting
+ user_class_setting __setting ( SETTING_HOST_EXTRA, user-class );
+ extern const struct setting
+diff -uNr ipxe_build.20160407/src/net/proxy.c ipxe_build.proxy/src/net/proxy.c
+--- ipxe_build.20160407/src/net/proxy.c 1970-01-01 01:00:00.000000000 +0100
++++ ipxe_build.proxy/src/net/proxy.c    2016-07-04 12:35:19.746409092 +0200
+@@ -0,0 +1,70 @@
++#include <string.h>
++#include <ipxe/proxy.h>
++#include <ipxe/uri.h>
++#include <ipxe/settings.h>
++
++/** @file
++ *
++ * HTTP Proxy
++ *
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER );
++
++struct uri *proxy_uri = NULL;
++
++/** HTTP proxy address setting */
++struct setting http_proxy_setting __setting ( SETTING_MISC, "" ) = {
++       .name = "http-proxy",
++       .description = "Address and port of the HTTP (not HTTPS) proxy to use, as a http scheme URI",
++       .type = &setting_type_string,
++};
++
++int is_proxy_set ( ) {
++       /* Later, this may be expanded to encompass other settings */
++       if ( ! proxy_uri ) {
++               proxy_uri = get_proxy();
++       }
++       return ! ! proxy_uri;
++}
++
++struct uri *get_proxy ( ) {
++       char *http_proxy_unexpanded, *http_proxy;
++
++       if ( setting_exists ( NULL, &http_proxy_setting ) && ! proxy_uri ) {
++               /* Later, this may select from multiple settings*/
++               fetch_string_setting_copy ( NULL, &http_proxy_setting, &http_proxy_unexpanded );
++               http_proxy = expand_settings ( http_proxy_unexpanded );
++               proxy_uri = parse_uri ( http_proxy );
++               free ( http_proxy_unexpanded );
++               free ( http_proxy );
++               /* Only the http scheme is currently supported */
++               if ( strcmp ( proxy_uri->scheme, "http" ) != 0 ) {
++                       uri_put ( proxy_uri );
++                       DBG ( "http-proxy must begin with \"http://\"" );
++                       return NULL;
++               }
++       }
++
++       return proxy_uri;
++}
++
++const char *proxied_uri_host ( struct uri *uri ) {
++       /* Later, this could select from multiple proxies,
++       based on hostname patterns matched against the uri */
++       if ( is_proxy_set ( ) ) {
++               return proxy_uri->host;
++       } else {
++               return uri->host;
++       }
++}
++
++unsigned int proxied_uri_port ( struct uri *uri, unsigned int default_port ) {
++       /* Later, this could select from multiple proxies,
++       based on hostname patterns matched against the uri */
++       if ( is_proxy_set ( ) ) {
++               return uri_port ( proxy_uri, default_port);
++       } else {
++               return uri_port ( uri, default_port);
++       }
++}
+diff -uNr ipxe_build.20160407/src/net/tcp/httpconn.c ipxe_build.proxy/src/net/tcp/httpconn.c
+--- ipxe_build.20160407/src/net/tcp/httpconn.c  2016-03-21 15:14:22.000000000 +0100
++++ ipxe_build.proxy/src/net/tcp/httpconn.c     2016-07-04 12:44:29.356499838 +0200
+@@ -41,6 +41,7 @@
+ #include <ipxe/open.h>
+ #include <ipxe/pool.h>
+ #include <ipxe/http.h>
++#include <ipxe/proxy.h>
+
+ /** HTTP pooled connection expiry time */
+ #define HTTP_CONN_EXPIRY ( 10 * TICKS_PER_SEC )
+@@ -250,7 +251,8 @@
+                return -EINVAL;
+
+        /* Identify port */
+-       port = uri_port ( uri, scheme->port );
++       #port = uri_port ( uri, scheme->port );
++       port = proxied_uri_port ( uri, scheme->port ) );
+
+        /* Look for a reusable connection in the pool */
+        list_for_each_entry ( conn, &http_connection_pool, pool.list ) {
+@@ -289,11 +291,11 @@
+        server.st_port = htons ( port );
+        socket = &conn->socket;
+        if ( scheme->filter &&
+-            ( ( rc = scheme->filter ( socket, uri->host, &socket ) ) != 0 ) )
++            ( ( rc = scheme->filter ( socket, proxied_uri_host ( uri ), &socket ) ) != 0 ) )
+                goto err_filter;
+        if ( ( rc = xfer_open_named_socket ( socket, SOCK_STREAM,
+                                             ( struct sockaddr * ) &server,
+-                                            uri->host, NULL ) ) != 0 )
++                                            proxied_uri_host ( uri ), NULL ) ) != 0 )
+                goto err_open;
+
+        /* Attach to parent interface, mortalise self, and return */
+diff -uNr ipxe_build.20160407/src/net/tcp/httpcore.c ipxe_build.proxy/src/net/tcp/httpcore.c
+--- ipxe_build.20160407/src/net/tcp/httpcore.c  2016-03-21 15:14:22.000000000 +0100
++++ ipxe_build.proxy/src/net/tcp/httpcore.c     2016-07-04 12:50:45.082194015 +0200
+@@ -56,6 +56,7 @@
+ #include <ipxe/profile.h>
+ #include <ipxe/vsprintf.h>
+ #include <ipxe/http.h>
++#include <ipxe/proxy.h>
+
+ /* Disambiguate the various error causes */
+ #define EACCES_401 __einfo_error ( EINFO_EACCES_401 )
+@@ -612,8 +613,13 @@
+
+        /* Calculate request URI length */
+        memset ( &request_uri, 0, sizeof ( request_uri ) );
+-       request_uri.path = ( uri->path ? uri->path : "/" );
+-       request_uri.query = uri->query;
++       if ( is_proxy_set ( ) ) {
++               /*include all fields*/
++               memcpy( &request_uri, http->uri, sizeof( request_uri ));
++       } else {
++               request_uri.path = ( uri->path ? uri->path : "/" );
++               request_uri.query = uri->query;
++       }
+        request_uri_len =
+                ( format_uri ( &request_uri, NULL, 0 ) + 1 /* NUL */);
+
